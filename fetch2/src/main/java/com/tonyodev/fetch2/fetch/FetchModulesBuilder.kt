@@ -1,5 +1,6 @@
 package com.tonyodev.fetch2.fetch
 
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
@@ -13,38 +14,68 @@ import com.tonyodev.fetch2.exception.FetchException
 import com.tonyodev.fetch2.helper.DownloadInfoUpdater
 import com.tonyodev.fetch2.helper.PriorityListProcessor
 import com.tonyodev.fetch2.helper.PriorityListProcessorImpl
+import com.tonyodev.fetch2.helper.ReferenceCounter
 import com.tonyodev.fetch2.provider.DownloadProvider
 import com.tonyodev.fetch2.provider.ListenerProvider
 import com.tonyodev.fetch2.provider.NetworkInfoProvider
 import com.tonyodev.fetch2.util.FETCH_ALREADY_EXIST
 
-import java.lang.ref.WeakReference
-
 object FetchModulesBuilder {
 
     private val lock = Object()
-    private val activeFetchHandlerPool: MutableMap<String, WeakReference<FetchHandler>> = hashMapOf()
+    private val referenceCounterPool: MutableMap<String, ReferenceCounter<Handler>> = hashMapOf()
+    private val pendingRemoveReferencePool: MutableMap<String, Boolean> = hashMapOf()
 
     fun buildModulesFromPrefs(prefs: FetchBuilderPrefs): Modules {
         synchronized(lock) {
-            val ref = activeFetchHandlerPool[prefs.namespace]?.get()
-            if (ref != null) {
-                throw FetchException("Namespace:${prefs.namespace} $FETCH_ALREADY_EXIST",
-                        FetchException.Code.FETCH_INSTANCE_WITH_NAMESPACE_ALREADY_EXIST)
+            val referenceCounter = referenceCounterPool[prefs.namespace]
+            return if (referenceCounter != null) {
+                val pendingRemoval = pendingRemoveReferencePool[prefs.namespace] ?: false
+                if (pendingRemoval && referenceCounter.getReferenceCount() <= 1) {
+                    referenceCounter.incrementReferenceCount()
+                } else {
+                    throw FetchException("Namespace:${prefs.namespace} $FETCH_ALREADY_EXIST",
+                            FetchException.Code.FETCH_INSTANCE_WITH_NAMESPACE_ALREADY_EXIST)
+                }
+                Modules(prefs, referenceCounter.data)
+            } else {
+                val modules = Modules(prefs, null)
+                val reference = ReferenceCounter(modules.handler)
+                reference.incrementReferenceCount()
+                referenceCounterPool[prefs.namespace] = reference
+                modules
             }
-            val modules = Modules(prefs)
-            activeFetchHandlerPool[prefs.namespace] = WeakReference(modules.fetchHandler)
-            return modules
         }
     }
 
-    fun removeActiveFetchHandlerNamespaceInstance(namespace: String) {
+    fun pendingRemoveActiveNamespaceInstance(namespace: String) {
         synchronized(lock) {
-            activeFetchHandlerPool.remove(namespace)
+            pendingRemoveReferencePool[namespace] = true
         }
     }
 
-    class Modules constructor(val prefs: FetchBuilderPrefs) {
+    fun removeActiveNamespaceInstance(namespace: String) {
+        synchronized(lock) {
+            val referenceCounter = referenceCounterPool[namespace]
+            referenceCounter?.decrementReferenceCount()
+            if (referenceCounter != null && referenceCounter.getReferenceCount() == 0) {
+                val looper = referenceCounter.data.looper
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                        looper.quitSafely()
+                    } else {
+                        looper.quit()
+                    }
+                } catch (e: Exception) {
+
+                }
+                referenceCounterPool.remove(namespace)
+            }
+            pendingRemoveReferencePool[namespace] = false
+        }
+    }
+
+    class Modules constructor(val prefs: FetchBuilderPrefs, initHandler: Handler?) {
 
         val uiHandler = Handler(Looper.getMainLooper())
         val handler: Handler
@@ -61,7 +92,7 @@ object FetchModulesBuilder {
         init {
             val handlerThread = HandlerThread("fetch_${prefs.namespace}")
             handlerThread.start()
-            handler = Handler(handlerThread.looper)
+            handler = initHandler ?: Handler(handlerThread.looper)
 
             fetchListenerProvider = ListenerProvider()
             networkInfoProvider = NetworkInfoProvider(prefs.appContext)

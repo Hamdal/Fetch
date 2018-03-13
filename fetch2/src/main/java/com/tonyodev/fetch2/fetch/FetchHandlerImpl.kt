@@ -1,6 +1,5 @@
 package com.tonyodev.fetch2.fetch
 
-import android.os.Build
 import android.os.Handler
 import com.tonyodev.fetch2.*
 import com.tonyodev.fetch2.database.DatabaseManager
@@ -464,18 +463,16 @@ class FetchHandlerImpl(private val namespace: String,
         closed = true
         fetchListenerProvider.listeners.clear()
         priorityListProcessor.stop()
-        downloadManager.close()
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-                handler.looper.quitSafely()
-            } else {
-                handler.looper.quit()
+        FetchModulesBuilder.pendingRemoveActiveNamespaceInstance(namespace)
+        handler.post {
+            try {
+                downloadManager.close()
+                databaseManager.close()
+            } catch (e: Exception) {
+                logger.e("FetchHandler", e)
             }
-        } catch (e: Exception) {
-            logger.e("FetchHandler", e)
+            FetchModulesBuilder.removeActiveNamespaceInstance(namespace)
         }
-        databaseManager.close()
-        FetchModulesBuilder.removeActiveFetchHandlerNamespaceInstance(namespace)
     }
 
     override fun setGlobalNetworkType(networkType: NetworkType) {
